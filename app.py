@@ -12,6 +12,7 @@ except ImportError:
 
 import requests
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -24,6 +25,7 @@ from proto import uid_generator_pb2
 
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 app.json.sort_keys = False
 
 
@@ -169,7 +171,17 @@ def ensure_jwt_token_sync(region, force_refresh=False):
     env_name = "JWT_TOKEN_{}".format(region)
     token = normalize_token(os.getenv(env_name))
     if not token:
-        raise RuntimeError("Not configured")
+        raise RuntimeError(f"{env_name} is not configured")
+
+    # HTTP Authorization headers must be Latin-1/ASCII compatible.
+    # A real JWT is ASCII-only. If a copied token contains Unicode characters,
+    # do not try to silently re-encode it: that would change the credential.
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError:
+        raise RuntimeError(
+            f"{env_name} contains non-ASCII characters. Replace it with the raw ASCII JWT/token from the provider; do not UTF-8 encode or add quotes."
+        )
     return token
 
 
@@ -192,6 +204,11 @@ def encrypt_aes(hex_data, key, iv):
 
 
 def make_headers(token):
+    token = normalize_token(token)
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError("JWT token contains non-ASCII characters and cannot be sent in an HTTP Authorization header") from exc
     return {
         "User-Agent": "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
         "Accept": "*/*",
@@ -413,10 +430,25 @@ def favicon():
 
 @app.route("/health", methods=["GET"])
 def health():
+    def token_status(name):
+        token = normalize_token(os.getenv(name))
+        if not token:
+            return {"configured": False, "ascii": False}
+        try:
+            token.encode("ascii")
+            ascii_ok = True
+        except UnicodeEncodeError:
+            ascii_ok = False
+        return {"configured": True, "ascii": ascii_ok}
+
     return jsonify({
         "status": "ok",
         "service": "Free Fire Player Info API",
         "regions": ["BD", "IND"],
+        "tokens": {
+            "BD": token_status("JWT_TOKEN_BD"),
+            "IND": token_status("JWT_TOKEN_IND")
+        },
         "time": get_iso_time()
     })
 
